@@ -269,8 +269,19 @@ static struct spi_driver tmi8152_driver = {
     .shutdown = NULL,
 };
 
+struct spi_board_info board_info_tmi8152[] = {
+    [0] = {
+           .modalias = "tmi8152",
+           .bus_num = 0,
+           .chip_select = 0,
+           .max_speed_hz = 4000000,
+            },
+};
+
 int __init tmi8152_mod_init(void)
 {
+    struct spi_master *spi_master_tmi8152;
+
     printk(KERN_INFO "Registering TMI8152 driver\n");
 
     mutex_init(&lock);
@@ -279,6 +290,9 @@ int __init tmi8152_mod_init(void)
     cdev_init(&tmi8152_cdev, &tmi8152_cdev_fops);
     tmi8152_cdev.owner = THIS_MODULE;
     cdev_add(&tmi8152_cdev, device_number, 1);
+
+    spi_master_tmi8152 = spi_busnum_to_master(board_info_tmi8152->bus_num);
+    sdev = spi_new_device(spi_master_tmi8152, board_info_tmi8152);
 
     class_tmi8152 = class_create(THIS_MODULE, "tmi8152_ir_cut");
     device_create(class_tmi8152, NULL, device_number, NULL,
@@ -297,6 +311,7 @@ void __exit tmi8152_mod_exit(void)
     unregister_chrdev_region(device_number, 1);
 
     spi_unregister_driver(&tmi8152_driver);
+    spi_unregister_device(&sdev);
 }
 
 
