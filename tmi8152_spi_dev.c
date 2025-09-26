@@ -254,13 +254,13 @@ static int tmi8152_spi_remove(struct spi_device *spi)
 
 struct spi_device_id sdev_id_table[] = {
     {
-     .name = "tmi8150b",
+     .name = "tmi8152",
       },
 };
 
 static struct spi_driver tmi8152_driver = {
     .driver = {
-               .name = "tmi8150b",
+               .name = "tmi8152",
                .owner = THIS_MODULE,
                 },
     .id_table = sdev_id_table,
