@@ -272,7 +272,9 @@ static struct spi_device_id sdev_id_table[] = {
     {
      .name = "tmi8152",
       },
+    {}
 };
+MODULE_DEVICE_TABLE(spi, sdev_id_table);
 
 static struct spi_driver tmi8152_driver = {
     .driver = {
