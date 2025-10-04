@@ -76,7 +76,7 @@ static ssize_t tmi8152_cdev_write(struct file *filp,
     mutex_lock(&lock);
     ret = copy_from_user(&temp_buff, buff, 1);
     mutex_unlock(&lock);
-    if (ret < 0) {
+    if (ret != 0) {
         printk(KERN_ERR "[%s] Error copying data from user\n", __func__);
         return -1;
     }
