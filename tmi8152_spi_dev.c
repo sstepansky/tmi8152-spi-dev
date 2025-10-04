@@ -37,6 +37,7 @@ static ssize_t tmi8152_cdev_read(struct file *filp, char __user *user_buf,
                                  size_t len, loff_t *off)
 {
     int ret, delta, max;
+    char temp_buff[1];
 
     printk(KERN_DEBUG "[%s] Reading data from device\n", __func__);
 
@@ -47,8 +48,10 @@ static ssize_t tmi8152_cdev_read(struct file *filp, char __user *user_buf,
         return 0;
 
     mutex_lock(&lock);
-    ret = copy_to_user(user_buf, &dev_buff[*off], max);
+    memcpy(temp_buff, &dev_buff[*off], max);
     mutex_unlock(&lock);
+
+    ret = copy_to_user(user_buf, temp_buff, max);
     delta = max - ret;
     if (ret)
         printk(KERN_WARNING "[%s] Copied only %d bytes!\n", __func__,
@@ -73,9 +76,8 @@ static ssize_t tmi8152_cdev_write(struct file *filp,
                __func__, count);
         return -1;
     }
-    mutex_lock(&lock);
+
     ret = copy_from_user(&temp_buff, buff, 1);
-    mutex_unlock(&lock);
     if (ret != 0) {
         printk(KERN_ERR "[%s] Error copying data from user\n", __func__);
         return -1;
@@ -89,7 +91,10 @@ static ssize_t tmi8152_cdev_write(struct file *filp,
         printk(KERN_ERR "[%s] Unrecognized value!\n", __func__);
         return -EINVAL;
     }
+
+    mutex_lock(&lock);
     dev_buff[0] = temp_buff[0];
+    mutex_unlock(&lock);
 
     return count;
 }
