@@ -121,15 +121,25 @@ static int set_ir_cut(int val)
         return -EINVAL;
     }
 
-    tmi8152_spi_status(1);
+    ret_1 = tmi8152_spi_status(1);
+    if (ret_1 < 0) {
+        pr_err("[%s] Error setting SPI status!\n", __func__);
+        return ret_1;
+    }
+
     ret_1 = tmi8152_spi_write(0x91, cmd);
     msleep(180);
     ret_2 = tmi8152_spi_write(0x91, 0x0);
-    tmi8152_spi_status(0);
 
     if (ret_1 < 0 || ret_2 < 0) {
-        pr_err("[%s] Error in IR cut!", __func__);
+        pr_err("[%s] Error in IR cut!\n", __func__);
         return -EIO;
+    }
+
+    ret_1 = tmi8152_spi_status(0);
+    if (ret_1 < 0) {
+        pr_err("[%s] Error clearing SPI status!\n", __func__);
+        return ret_1;
     }
 
     return 0;
@@ -137,14 +147,19 @@ static int set_ir_cut(int val)
 
 static int tmi8152_spi_status(int status)
 {
-    tmi8152_spi_write(0x82, 0x03);
+    int ret;
+
+    ret = tmi8152_spi_write(0x82, 0x03);
+    if (ret < 0)
+        return ret;
+
     if (status == 0) {
-        tmi8152_spi_write(0x82, 0xc1);
+        ret = tmi8152_spi_write(0x82, 0xc1);
     } else if (status == 1) {
-        tmi8152_spi_write(0x82, 0x8b);
+        ret = tmi8152_spi_write(0x82, 0x8b);
     }
 
-    return 0;
+    return ret;
 }
 
 static int tmi8152_spi_read(int addr, int *value)
@@ -234,7 +249,7 @@ static int tmi8152_spi_probe(struct spi_device *spi)
     ret_1 = tmi8152_spi_write(0x82, 0x03);
     ret_2 = tmi8152_spi_write(0x82, 0x8b);
     if (ret_1 < 0 || ret_2 < 0) {
-        pr_err("[%s] Error writing to TMI8152: %d, %d", __func__,
+        pr_err("[%s] Error writing to TMI8152: %d, %d\n", __func__,
                ret_1, ret_2);
         return -EIO;
     }
@@ -253,7 +268,7 @@ static int tmi8152_spi_remove(struct spi_device *spi)
     return 0;
 }
 
-struct spi_device_id sdev_id_table[] = {
+static struct spi_device_id sdev_id_table[] = {
     {
      .name = "tmi8152",
       },
