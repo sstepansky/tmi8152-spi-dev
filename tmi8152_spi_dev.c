@@ -186,15 +186,13 @@ int tmi8152_spi_write(int addr, int value)
     int ret = 0;
     struct spi_message message;
     struct spi_transfer transfer;
-    char wbuf[3];
+    char wbuf[2];
 
     spi_message_init(&message);
     memset(&transfer, 0, sizeof(transfer));
 
     wbuf[0] = addr & 0xff;
-
     wbuf[1] = value & 0xff;
-    wbuf[2] = (value >> 8) & 0xff;
 
     transfer.tx_buf = wbuf;
     transfer.len = 2;
