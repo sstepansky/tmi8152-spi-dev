@@ -15,8 +15,6 @@ static struct spi_device *sdev = NULL;
 struct cdev tmi8152_cdev;
 struct class *class_tmi8152;
 
-static struct file_operations tmi8152_cdev_fops;
-
 static struct mutex lock;
 static char dev_buff[1];
 
