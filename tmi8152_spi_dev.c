@@ -21,13 +21,13 @@ static char dev_buff[1];
 
 static int tmi8152_cdev_open(struct inode *inode, struct file *fd)
 {
-    printk(KERN_DEBUG "[%s] Opened TMI8152 character device\n", __func__);
+    pr_debug("[%s] Opened TMI8152 character device\n", __func__);
     return 0;
 }
 
 static int tmi8152_cdev_release(struct inode *inode, struct file *fd)
 {
-    printk(KERN_DEBUG "[%s] Closed TMI8152 character device\n", __func__);
+    pr_debug("[%s] Closed TMI8152 character device\n", __func__);
     return 0;
 }
 
@@ -37,7 +37,7 @@ static ssize_t tmi8152_cdev_read(struct file *filp, char __user *user_buf,
     int ret, delta, max;
     char temp_buff[1];
 
-    printk(KERN_DEBUG "[%s] Reading data from device\n", __func__);
+    pr_debug("[%s] Reading data from device\n", __func__);
 
     max =
         (len + *off) < sizeof(dev_buff) ? len : (sizeof(dev_buff) - *off);
@@ -52,7 +52,7 @@ static ssize_t tmi8152_cdev_read(struct file *filp, char __user *user_buf,
     ret = copy_to_user(user_buf, temp_buff, max);
     delta = max - ret;
     if (ret)
-        printk(KERN_WARNING "[%s] Copied only %d bytes!\n", __func__,
+        pr_warn("[%s] Copied only %d bytes!\n", __func__,
                delta);
 
     *off += delta;
@@ -67,17 +67,17 @@ static ssize_t tmi8152_cdev_write(struct file *filp,
     int ret;
     char temp_buff[1];
 
-    printk(KERN_DEBUG "[%s] Writing data to device\n", __func__);
+    pr_debug("[%s] Writing data to device\n", __func__);
 
     if (count > 1) {
-        printk(KERN_ERR "[%s] Got %d bytes. Only one byte will be read\n",
+        pr_err("[%s] Got %d bytes. Only one byte will be read\n",
                __func__, count);
         return -EINVAL;
     }
 
     ret = copy_from_user(&temp_buff, buff, 1);
     if (ret != 0) {
-        printk(KERN_ERR "[%s] Error copying data from user\n", __func__);
+        pr_err("[%s] Error copying data from user\n", __func__);
         return -EFAULT;
     }
 
@@ -86,7 +86,7 @@ static ssize_t tmi8152_cdev_write(struct file *filp,
     } else if (temp_buff[0] == '0') {
         set_ir_cut(0);
     } else {
-        printk(KERN_ERR "[%s] Unrecognized value!\n", __func__);
+        pr_err("[%s] Unrecognized value!\n", __func__);
         return -EINVAL;
     }
 
@@ -117,7 +117,7 @@ static int set_ir_cut(int val)
     } else if (val == 1) {
         cmd = 0x8a;
     } else {
-        printk(KERN_ERR "[%s] Unrecognized value", __func__);
+        pr_err("[%s] Unrecognized value\n", __func__);
         return -EINVAL;
     }
 
@@ -128,7 +128,7 @@ static int set_ir_cut(int val)
     tmi8152_spi_status(0);
 
     if (ret_1 < 0 || ret_2 < 0) {
-        printk(KERN_ERR "[%s] Error in IR cut!", __func__);
+        pr_err("[%s] Error in IR cut!", __func__);
         return -EIO;
     }
 
@@ -172,7 +172,7 @@ static int tmi8152_spi_read(int addr, int *value)
     ret = spi_sync(sdev, &message);
 
     if (ret) {
-        printk(KERN_ERR "[%s] Error reading message from SPI device!\n",
+        pr_err("[%s] Error reading message from SPI device!\n",
                __func__);
         return ret;
     }
@@ -201,7 +201,7 @@ int tmi8152_spi_write(int addr, int value)
 
     ret = spi_sync(sdev, &message);
     if (ret) {
-        printk(KERN_ERR "[%s] Error writing message to SPI device!\n",
+        pr_err("[%s] Error writing message to SPI device!\n",
                __func__);
         ret = -EIO;
     }
@@ -220,13 +220,13 @@ static int tmi8152_spi_probe(struct spi_device *spi)
     spi->mode = 0;
     sdev = spi;
 
-    printk(KERN_INFO "Probing TMI8152 driver\n");
+    pr_info("Probing TMI8152 driver\n");
     tmi8152_spi_read(0x00, &id_hi);
     tmi8152_spi_read(0x01, &id_lo);
     if (id_hi == 0x81 && id_lo == 0x50) {
-        printk(KERN_INFO "Chip ID is 0x%02x%02x\n", id_hi, id_lo);
+        pr_info("Chip ID is 0x%02x%02x\n", id_hi, id_lo);
     } else {
-        printk(KERN_ERR "Chip ID 0x%02x%02x is not TMI8152!\n", id_hi,
+        pr_err("Chip ID 0x%02x%02x is not TMI8152!\n", id_hi,
                id_lo);
         return -ENODEV;
     }
@@ -234,7 +234,7 @@ static int tmi8152_spi_probe(struct spi_device *spi)
     ret_1 = tmi8152_spi_write(0x82, 0x03);
     ret_2 = tmi8152_spi_write(0x82, 0x8b);
     if (ret_1 < 0 || ret_2 < 0) {
-        printk(KERN_ERR "[%s] Error writing to TMI8152: %d, %d", __func__,
+        pr_err("[%s] Error writing to TMI8152: %d, %d", __func__,
                ret_1, ret_2);
         return -EIO;
     }
@@ -283,7 +283,7 @@ int __init tmi8152_mod_init(void)
 {
     struct spi_master *spi_master_tmi8152;
 
-    printk(KERN_INFO "Registering TMI8152 driver\n");
+    pr_info("Registering TMI8152 driver\n");
 
     mutex_init(&lock);
 
@@ -304,7 +304,7 @@ int __init tmi8152_mod_init(void)
 
 void __exit tmi8152_mod_exit(void)
 {
-    printk(KERN_INFO "Unregistering TMI8152 driver\n");
+    pr_info("Unregistering TMI8152 driver\n");
 
     device_destroy(class_tmi8152, device_number);
     class_destroy(class_tmi8152);
