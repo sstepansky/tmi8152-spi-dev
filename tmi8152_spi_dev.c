@@ -74,13 +74,13 @@ static ssize_t tmi8152_cdev_write(struct file *filp,
     if (count > 1) {
         printk(KERN_ERR "[%s] Got %d bytes. Only one byte will be read\n",
                __func__, count);
-        return -1;
+        return -EINVAL;
     }
 
     ret = copy_from_user(&temp_buff, buff, 1);
     if (ret != 0) {
         printk(KERN_ERR "[%s] Error copying data from user\n", __func__);
-        return -1;
+        return -EFAULT;
     }
 
     if (temp_buff[0] == '1') {
@@ -120,7 +120,7 @@ static int set_ir_cut(int val)
         cmd = 0x8a;
     } else {
         printk(KERN_ERR "[%s] Unrecognized value", __func__);
-        return -1;
+        return -EINVAL;
     }
 
     tmi8152_spi_status(1);
@@ -131,7 +131,7 @@ static int set_ir_cut(int val)
 
     if (ret_1 < 0 || ret_2 < 0) {
         printk(KERN_ERR "[%s] Error in IR cut!", __func__);
-        return -1;
+        return -EIO;
     }
 
     return 0;
@@ -240,7 +240,7 @@ static int tmi8152_spi_probe(struct spi_device *spi)
     if (ret_1 < 0 || ret_2 < 0) {
         printk(KERN_ERR "[%s] Error writing to TMI8152: %d, %d", __func__,
                ret_1, ret_2);
-        return -1;
+        return -EIO;
     }
 
     set_ir_cut(1);
