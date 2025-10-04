@@ -316,7 +316,8 @@ void __exit tmi8152_mod_exit(void)
     unregister_chrdev_region(device_number, 1);
 
     spi_unregister_driver(&tmi8152_driver);
-    spi_unregister_device(sdev);
+    if (sdev)
+        spi_unregister_device(sdev);
 }
 
 
