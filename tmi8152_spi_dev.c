@@ -52,8 +52,7 @@ static ssize_t tmi8152_cdev_read(struct file *filp, char __user *user_buf,
     ret = copy_to_user(user_buf, temp_buff, max);
     delta = max - ret;
     if (ret)
-        pr_warn("[%s] Copied only %d bytes!\n", __func__,
-               delta);
+        pr_warn("[%s] Copied only %d bytes!\n", __func__, delta);
 
     *off += delta;
 
@@ -91,7 +90,8 @@ static ssize_t tmi8152_cdev_write(struct file *filp,
     mutex_lock(&lock);
     if (temp_buff[0] == dev_buff[0]) {
         mutex_unlock(&lock);
-        pr_debug("[%s] Already in mode %c, skipping\n", __func__, temp_buff[0]);
+        pr_debug("[%s] Already in mode %c, skipping\n", __func__,
+                 temp_buff[0]);
         return count;
     }
     mutex_unlock(&lock);
@@ -206,8 +206,7 @@ static int tmi8152_spi_read(int addr, int *value)
     ret = spi_sync(sdev, &message);
 
     if (ret) {
-        pr_err("[%s] Error reading message from SPI device!\n",
-               __func__);
+        pr_err("[%s] Error reading message from SPI device!\n", __func__);
         return ret;
     }
     *value = rbuf[0];
@@ -235,8 +234,7 @@ int tmi8152_spi_write(int addr, int value)
 
     ret = spi_sync(sdev, &message);
     if (ret) {
-        pr_err("[%s] Error writing message to SPI device!\n",
-               __func__);
+        pr_err("[%s] Error writing message to SPI device!\n", __func__);
         ret = -EIO;
     }
 
@@ -260,8 +258,7 @@ static int tmi8152_spi_probe(struct spi_device *spi)
     if (id_hi == 0x81 && id_lo == 0x50) {
         pr_info("Chip ID is 0x%02x%02x\n", id_hi, id_lo);
     } else {
-        pr_err("Chip ID 0x%02x%02x is not TMI8152!\n", id_hi,
-               id_lo);
+        pr_err("Chip ID 0x%02x%02x is not TMI8152!\n", id_hi, id_lo);
         return -ENODEV;
     }
 
@@ -291,8 +288,9 @@ static struct spi_device_id sdev_id_table[] = {
     {
      .name = "tmi8152",
       },
-    {}
+    { }
 };
+
 MODULE_DEVICE_TABLE(spi, sdev_id_table);
 
 static struct spi_driver tmi8152_driver = {
@@ -377,16 +375,16 @@ int __init tmi8152_mod_init(void)
     pr_info("TMI8152 driver registered successfully\n");
     return 0;
 
-err_register:
+  err_register:
     device_destroy(class_tmi8152, device_number);
-err_device:
+  err_device:
     class_destroy(class_tmi8152);
-err_class:
+  err_class:
     spi_unregister_device(sdev);
-err_spi_device:
-err_spi_master:
+  err_spi_device:
+  err_spi_master:
     cdev_del(&tmi8152_cdev);
-err_cdev_add:
+  err_cdev_add:
     unregister_chrdev_region(device_number, 1);
     return ret;
 }
