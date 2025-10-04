@@ -81,15 +81,34 @@ static ssize_t tmi8152_cdev_write(struct file *filp,
         return -EFAULT;
     }
 
-    if (temp_buff[0] == '1') {
-        set_ir_cut(1);
-    } else if (temp_buff[0] == '0') {
-        set_ir_cut(0);
-    } else {
+    /* Validate input */
+    if (temp_buff[0] != '0' && temp_buff[0] != '1') {
         pr_err("[%s] Unrecognized value!\n", __func__);
         return -EINVAL;
     }
 
+    /* Check if already in requested mode */
+    mutex_lock(&lock);
+    if (temp_buff[0] == dev_buff[0]) {
+        mutex_unlock(&lock);
+        pr_debug("[%s] Already in mode %c, skipping\n", __func__, temp_buff[0]);
+        return count;
+    }
+    mutex_unlock(&lock);
+
+    /* Execute IR filter change */
+    if (temp_buff[0] == '1') {
+        ret = set_ir_cut(1);
+    } else {
+        ret = set_ir_cut(0);
+    }
+
+    if (ret < 0) {
+        pr_err("[%s] Failed to set IR cut mode\n", __func__);
+        return ret;
+    }
+
+    /* Update state after successful change */
     mutex_lock(&lock);
     dev_buff[0] = temp_buff[0];
     mutex_unlock(&lock);
