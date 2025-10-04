@@ -176,7 +176,7 @@ static int tmi8152_spi_read(int addr, int *value)
                __func__);
         return ret;
     }
-    *value = *(unsigned int *) rbuf;
+    *value = rbuf[0];
 
     return ret;
 }
