@@ -124,7 +124,7 @@ static int set_ir_cut(int val)
     ret_2 = tmi8152_spi_write(0x91, 0x0);
     tmi8152_spi_status(0);
 
-    if (ret_1 | ret_2 < 0) {
+    if (ret_1 < 0 || ret_2 < 0) {
         printk(KERN_ERR "[%s] Error in IR cut!", __func__);
         return -1;
     }
@@ -232,7 +232,7 @@ static int tmi8152_spi_probe(struct spi_device *spi)
 
     ret_1 = tmi8152_spi_write(0x82, 0x03);
     ret_2 = tmi8152_spi_write(0x82, 0x8b);
-    if (ret_1 | ret_2 < 0) {
+    if (ret_1 < 0 || ret_2 < 0) {
         printk(KERN_ERR "[%s] Error writing to TMI8152: %d, %d", __func__,
                ret_1, ret_2);
         return -1;
