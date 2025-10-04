@@ -318,24 +318,77 @@ struct spi_board_info board_info_tmi8152[] = {
 int __init tmi8152_mod_init(void)
 {
     struct spi_master *spi_master_tmi8152;
+    struct device *dev;
+    int ret;
 
     pr_info("Registering TMI8152 driver\n");
 
     mutex_init(&lock);
 
-    alloc_chrdev_region(&device_number, 0, 1, "tmi8152_ir_cut");
+    ret = alloc_chrdev_region(&device_number, 0, 1, "tmi8152_ir_cut");
+    if (ret < 0) {
+        pr_err("Failed to allocate chrdev region: %d\n", ret);
+        return ret;
+    }
+
     cdev_init(&tmi8152_cdev, &tmi8152_cdev_fops);
     tmi8152_cdev.owner = THIS_MODULE;
-    cdev_add(&tmi8152_cdev, device_number, 1);
+    ret = cdev_add(&tmi8152_cdev, device_number, 1);
+    if (ret < 0) {
+        pr_err("Failed to add cdev: %d\n", ret);
+        goto err_cdev_add;
+    }
 
     spi_master_tmi8152 = spi_busnum_to_master(board_info_tmi8152->bus_num);
+    if (!spi_master_tmi8152) {
+        pr_err("Failed to get SPI master\n");
+        ret = -ENODEV;
+        goto err_spi_master;
+    }
+
     sdev = spi_new_device(spi_master_tmi8152, board_info_tmi8152);
+    if (!sdev) {
+        pr_err("Failed to create SPI device\n");
+        ret = -ENOMEM;
+        goto err_spi_device;
+    }
 
     class_tmi8152 = class_create(THIS_MODULE, "tmi8152_ir_cut");
-    device_create(class_tmi8152, NULL, device_number, NULL,
-                  "tmi8152_ir_cut");
+    if (IS_ERR(class_tmi8152)) {
+        pr_err("Failed to create class\n");
+        ret = PTR_ERR(class_tmi8152);
+        goto err_class;
+    }
 
-    return spi_register_driver(&tmi8152_driver);
+    dev = device_create(class_tmi8152, NULL, device_number, NULL,
+                        "tmi8152_ir_cut");
+    if (IS_ERR(dev)) {
+        pr_err("Failed to create device\n");
+        ret = PTR_ERR(dev);
+        goto err_device;
+    }
+
+    ret = spi_register_driver(&tmi8152_driver);
+    if (ret < 0) {
+        pr_err("Failed to register SPI driver: %d\n", ret);
+        goto err_register;
+    }
+
+    pr_info("TMI8152 driver registered successfully\n");
+    return 0;
+
+err_register:
+    device_destroy(class_tmi8152, device_number);
+err_device:
+    class_destroy(class_tmi8152);
+err_class:
+    spi_unregister_device(sdev);
+err_spi_device:
+err_spi_master:
+    cdev_del(&tmi8152_cdev);
+err_cdev_add:
+    unregister_chrdev_region(device_number, 1);
+    return ret;
 }
 
 void __exit tmi8152_mod_exit(void)
