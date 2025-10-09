@@ -6,6 +6,7 @@
 #include <linux/fs.h>
 #include <linux/cdev.h>
 #include <linux/mutex.h>
+#include <linux/uaccess.h>
 #include "tmi8152_spi_dev.h"
 
 
