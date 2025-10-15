@@ -146,13 +146,6 @@ static int set_ir_cut(int val)
 
     mutex_lock(&tmi8152_spi_lock);
 
-    ret_1 = tmi8152_spi_status(1);
-    if (ret_1 < 0) {
-        pr_err("[%s] Error setting SPI status!\n", __func__);
-        mutex_unlock(&tmi8152_spi_lock);
-        return ret_1;
-    }
-
     ret_1 = tmi8152_spi_write(TMI8152_IR_CUT_CONTROL | 0x80, cmd);
     msleep(180);
     ret_2 = tmi8152_spi_write(TMI8152_IR_CUT_CONTROL | 0x80, 0x0);
@@ -161,13 +154,6 @@ static int set_ir_cut(int val)
         pr_err("[%s] Error in IR cut!\n", __func__);
         mutex_unlock(&tmi8152_spi_lock);
         return -EIO;
-    }
-
-    ret_1 = tmi8152_spi_status(0);
-    if (ret_1 < 0) {
-        pr_err("[%s] Error clearing SPI status!\n", __func__);
-        mutex_unlock(&tmi8152_spi_lock);
-        return ret_1;
     }
 
     mutex_unlock(&tmi8152_spi_lock);
@@ -180,9 +166,13 @@ int tmi8152_spi_status(int status)
 {
     int ret;
 
+    mutex_lock(&tmi8152_spi_lock);
+
     ret = tmi8152_spi_write(TMI8152_CTRL_STATUS, TMI8152_CTRL_INIT);
-    if (ret < 0)
+    if (ret < 0) {
+        mutex_unlock(&tmi8152_spi_lock);
         return ret;
+    }
 
     if (status == 0) {
         /* Disable */
@@ -191,6 +181,8 @@ int tmi8152_spi_status(int status)
         /* Enable */
         ret = tmi8152_spi_write(TMI8152_CTRL_STATUS, TMI8152_CTRL_ENABLE);
     }
+
+    mutex_unlock(&tmi8152_spi_lock);
 
     return ret;
 }
@@ -396,6 +388,8 @@ int __init tmi8152_mod_init(void)
         goto err_register;
     }
 
+    tmi8152_spi_status(1);
+
     pr_info("TMI8152 driver registered successfully\n");
     return 0;
 
@@ -416,6 +410,8 @@ int __init tmi8152_mod_init(void)
 void __exit tmi8152_mod_exit(void)
 {
     pr_info("Unregistering TMI8152 driver\n");
+
+    tmi8152_spi_status(0);
 
     device_destroy(class_tmi8152, device_number);
     class_destroy(class_tmi8152);
