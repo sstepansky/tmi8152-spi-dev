@@ -8,6 +8,7 @@
 #include <linux/mutex.h>
 #include <linux/uaccess.h>
 #include "tmi8152_spi_dev.h"
+#include "tmi8152_regs.h"
 
 
 dev_t device_number;
@@ -16,7 +17,9 @@ static struct spi_device *sdev = NULL;
 struct cdev tmi8152_cdev;
 struct class *class_tmi8152;
 
-static struct mutex lock;
+struct mutex tmi8152_spi_lock;
+EXPORT_SYMBOL(tmi8152_spi_lock);
+
 static char dev_buff[1];
 
 
@@ -46,9 +49,9 @@ static ssize_t tmi8152_cdev_read(struct file *filp, char __user *user_buf,
     if (*off >= sizeof(dev_buff))
         return 0;
 
-    mutex_lock(&lock);
+    mutex_lock(&tmi8152_spi_lock);
     memcpy(temp_buff, &dev_buff[*off], max);
-    mutex_unlock(&lock);
+    mutex_unlock(&tmi8152_spi_lock);
 
     ret = copy_to_user(user_buf, temp_buff, max);
     delta = max - ret;
@@ -88,14 +91,14 @@ static ssize_t tmi8152_cdev_write(struct file *filp,
     }
 
     /* Check if already in requested mode */
-    mutex_lock(&lock);
+    mutex_lock(&tmi8152_spi_lock);
     if (temp_buff[0] == dev_buff[0]) {
-        mutex_unlock(&lock);
+        mutex_unlock(&tmi8152_spi_lock);
         pr_debug("[%s] Already in mode %c, skipping\n", __func__,
                  temp_buff[0]);
         return count;
     }
-    mutex_unlock(&lock);
+    mutex_unlock(&tmi8152_spi_lock);
 
     /* Execute IR filter change */
     if (temp_buff[0] == '1') {
@@ -110,9 +113,9 @@ static ssize_t tmi8152_cdev_write(struct file *filp,
     }
 
     /* Update state after successful change */
-    mutex_lock(&lock);
+    mutex_lock(&tmi8152_spi_lock);
     dev_buff[0] = temp_buff[0];
-    mutex_unlock(&lock);
+    mutex_unlock(&tmi8152_spi_lock);
 
     return count;
 }
@@ -133,56 +136,67 @@ static int set_ir_cut(int val)
     int cmd;
 
     if (val == 0) {
-        cmd = 0x86;
+        cmd = TMI8152_IR_CUT_OFF;
     } else if (val == 1) {
-        cmd = 0x8a;
+        cmd = TMI8152_IR_CUT_ON;
     } else {
         pr_err("[%s] Unrecognized value\n", __func__);
         return -EINVAL;
     }
 
+    mutex_lock(&tmi8152_spi_lock);
+
     ret_1 = tmi8152_spi_status(1);
     if (ret_1 < 0) {
         pr_err("[%s] Error setting SPI status!\n", __func__);
+        mutex_unlock(&tmi8152_spi_lock);
         return ret_1;
     }
 
-    ret_1 = tmi8152_spi_write(0x91, cmd);
+    ret_1 = tmi8152_spi_write(TMI8152_IR_CUT_CONTROL | 0x80, cmd);
     msleep(180);
-    ret_2 = tmi8152_spi_write(0x91, 0x0);
+    ret_2 = tmi8152_spi_write(TMI8152_IR_CUT_CONTROL | 0x80, 0x0);
 
     if (ret_1 < 0 || ret_2 < 0) {
         pr_err("[%s] Error in IR cut!\n", __func__);
+        mutex_unlock(&tmi8152_spi_lock);
         return -EIO;
     }
 
     ret_1 = tmi8152_spi_status(0);
     if (ret_1 < 0) {
         pr_err("[%s] Error clearing SPI status!\n", __func__);
+        mutex_unlock(&tmi8152_spi_lock);
         return ret_1;
     }
+
+    mutex_unlock(&tmi8152_spi_lock);
 
     return 0;
 }
 
-static int tmi8152_spi_status(int status)
+/* Enable (1) or disable (0) */
+int tmi8152_spi_status(int status)
 {
     int ret;
 
-    ret = tmi8152_spi_write(0x82, 0x03);
+    ret = tmi8152_spi_write(TMI8152_CTRL_STATUS, TMI8152_CTRL_INIT);
     if (ret < 0)
         return ret;
 
     if (status == 0) {
-        ret = tmi8152_spi_write(0x82, 0xc1);
+        /* Disable */
+        ret = tmi8152_spi_write(TMI8152_CTRL_STATUS, TMI8152_CTRL_DISABLE);
     } else if (status == 1) {
-        ret = tmi8152_spi_write(0x82, 0x8b);
+        /* Enable */
+        ret = tmi8152_spi_write(TMI8152_CTRL_STATUS, TMI8152_CTRL_ENABLE);
     }
 
     return ret;
 }
+EXPORT_SYMBOL(tmi8152_spi_status);
 
-static int tmi8152_spi_read(int addr, int *value)
+int tmi8152_spi_read(int addr, int *value)
 {
     struct spi_message message;
     struct spi_transfer transfer[2];
@@ -214,6 +228,7 @@ static int tmi8152_spi_read(int addr, int *value)
 
     return ret;
 }
+EXPORT_SYMBOL(tmi8152_spi_read);
 
 int tmi8152_spi_write(int addr, int value)
 {
@@ -241,6 +256,7 @@ int tmi8152_spi_write(int addr, int value)
 
     return ret;
 }
+EXPORT_SYMBOL(tmi8152_spi_write);
 
 static int tmi8152_spi_probe(struct spi_device *spi)
 {
@@ -254,17 +270,24 @@ static int tmi8152_spi_probe(struct spi_device *spi)
     sdev = spi;
 
     pr_info("Probing TMI8152 driver\n");
-    tmi8152_spi_read(0x00, &id_hi);
-    tmi8152_spi_read(0x01, &id_lo);
-    if (id_hi == 0x81 && id_lo == 0x50) {
+
+    mutex_lock(&tmi8152_spi_lock);
+    tmi8152_spi_read(TMI8152_CHIP_ID_H, &id_hi);
+    tmi8152_spi_read(TMI8152_CHIP_ID_L, &id_lo);
+    mutex_unlock(&tmi8152_spi_lock);
+
+    if (id_hi == TMI8152_EXPECTED_ID_H && id_lo == TMI8152_EXPECTED_ID_L) {
         pr_info("Chip ID is 0x%02x%02x\n", id_hi, id_lo);
     } else {
         pr_err("Chip ID 0x%02x%02x is not TMI8152!\n", id_hi, id_lo);
         return -ENODEV;
     }
 
-    ret_1 = tmi8152_spi_write(0x82, 0x03);
-    ret_2 = tmi8152_spi_write(0x82, 0x8b);
+    mutex_lock(&tmi8152_spi_lock);
+    ret_1 = tmi8152_spi_write(TMI8152_CTRL_STATUS, TMI8152_CTRL_INIT);
+    ret_2 = tmi8152_spi_write(TMI8152_CTRL_STATUS, TMI8152_CTRL_ENABLE);
+    mutex_unlock(&tmi8152_spi_lock);
+
     if (ret_1 < 0 || ret_2 < 0) {
         pr_err("[%s] Error writing to TMI8152: %d, %d\n", __func__,
                ret_1, ret_2);
@@ -322,7 +345,7 @@ int __init tmi8152_mod_init(void)
 
     pr_info("Registering TMI8152 driver\n");
 
-    mutex_init(&lock);
+    mutex_init(&tmi8152_spi_lock);
 
     ret = alloc_chrdev_region(&device_number, 0, 1, "tmi8152_ir_cut");
     if (ret < 0) {
