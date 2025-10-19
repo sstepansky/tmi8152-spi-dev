@@ -131,6 +131,11 @@ static int motor_monitor_fn(void *data)
 				stable_count++;
 				/* Consider motor stopped after 2 consecutive stable readings (200ms) */
 				if (stable_count >= 2) {
+					/* Update position based on actual chip movement */
+					if (motor.homed) {
+						motor.x_pos += x_pos;
+						motor.y_pos += y_pos;
+					}
 					pr_info("Motor stopped: x=%d, y=%d\n",
 						motor.x_pos, motor.y_pos);
 					motor.running = false;
@@ -284,14 +289,13 @@ static void motor_move_steps(int x_steps, int y_steps)
 
 	pr_debug("motor_move_steps: x=%d, y=%d, speed=0x%02x\n", x_steps, y_steps, motor.speed);
 
-	/* Update logical position by adding delta (only if homed) */
-	if (motor.homed) {
-		motor.x_pos += x_steps;
-		motor.y_pos += y_steps;
-		pr_debug("New logical position: x=%d, y=%d\n", motor.x_pos, motor.y_pos);
-	} else {
-		pr_debug("Not homed yet - position tracking disabled\n");
-	}
+	/* Clear both axis phase registers to 0 so inactive axis reads 0 */
+	mutex_lock(&tmi8152_spi_lock);
+	tmi8152_spi_write(ch_phase_l[motor.x_ch] | 0x80, 0x00);
+	tmi8152_spi_write(ch_phase_h[motor.x_ch] | 0x80, 0x00);
+	tmi8152_spi_write(ch_phase_l[motor.y_ch] | 0x80, 0x00);
+	tmi8152_spi_write(ch_phase_h[motor.y_ch] | 0x80, 0x00);
+	mutex_unlock(&tmi8152_spi_lock);
 
 	/* Set motor running flag to start monitoring */
 	motor.running = true;
@@ -324,8 +328,6 @@ static void motor_move_steps(int x_steps, int y_steps)
 		tmi8152_spi_write(ch_dir[motor.x_ch] | 0x80, direction);
 		tmi8152_spi_write(ch_speed[motor.x_ch] | 0x80, motor.speed);
 		tmi8152_spi_write(ch_ctrl[motor.x_ch] | 0x80, TMI8152_MODE_POS);
-		tmi8152_spi_write(ch_phase_l[motor.x_ch] | 0x80, 0x00);
-		tmi8152_spi_write(ch_phase_h[motor.x_ch] | 0x80, 0x00);
 		tmi8152_spi_write(ch_tgt_l[motor.x_ch] | 0x80, target_low);
 		tmi8152_spi_write(ch_tgt_h[motor.x_ch] | 0x80, target_high);
 		tmi8152_spi_write(ch_ctrl[motor.x_ch] | 0x80,
@@ -361,8 +363,6 @@ static void motor_move_steps(int x_steps, int y_steps)
 		tmi8152_spi_write(ch_dir[motor.y_ch] | 0x80, direction);
 		tmi8152_spi_write(ch_speed[motor.y_ch] | 0x80, motor.speed);
 		tmi8152_spi_write(ch_ctrl[motor.y_ch] | 0x80, TMI8152_MODE_POS);
-		tmi8152_spi_write(ch_phase_l[motor.y_ch] | 0x80, 0x00);
-		tmi8152_spi_write(ch_phase_h[motor.y_ch] | 0x80, 0x00);
 		tmi8152_spi_write(ch_tgt_l[motor.y_ch] | 0x80, target_low);
 		tmi8152_spi_write(ch_tgt_h[motor.y_ch] | 0x80, target_high);
 		tmi8152_spi_write(ch_ctrl[motor.y_ch] | 0x80,
@@ -417,14 +417,20 @@ static void motor_stop(void)
 	tmi8152_spi_write(ch_ctrl[motor.y_ch] | 0x80, 0x00);
 	mutex_unlock(&tmi8152_spi_lock);
 
-	/* Read current chip position for logging */
+	/* Read current chip position */
 	motor_read_position(&x_pos, &y_pos);
+
+	/* Update position based on actual chip movement */
+	if (motor.homed) {
+		motor.x_pos += x_pos;
+		motor.y_pos += y_pos;
+	}
 
 	/* Clear running flag */
 	motor.running = false;
 
-	pr_debug("Motors stopped at logical position: x=%d, y=%d (chip: x=%d, y=%d)\n",
-		motor.x_pos, motor.y_pos, x_pos, y_pos);
+	pr_debug("Motors stopped at position: x=%d, y=%d\n",
+		motor.x_pos, motor.y_pos);
 }
 
 /**
