@@ -88,6 +88,7 @@ static int vmaxstep = 2730;
 static int x_channel = 1;
 static int y_channel = 0;
 static int max_speed = 430;
+static int home_position_center = 0;
 module_param(hmaxstep, int, 0644);
 MODULE_PARM_DESC(hmaxstep, "Maximum horizontal (X-axis) steps");
 module_param(vmaxstep, int, 0644);
@@ -98,6 +99,8 @@ module_param(y_channel, int, 0444);
 MODULE_PARM_DESC(y_channel, "Hardware channel for Y-axis (0 or 1, default 0)");
 module_param(max_speed, int, 0644);
 MODULE_PARM_DESC(max_speed, "Maximum motor speed (default 430)");
+module_param(home_position_center, int, 0644);
+MODULE_PARM_DESC(home_position_center, "Move to center position before setting home (1=yes, 0=no, default 0)");
 
 /* Module globals */
 dev_t motor_dev_number;
@@ -186,29 +189,38 @@ static int motor_homing(void)
 
 	pr_debug("Reached maximum limits\n");
 
-	/* Step 2: Move to home position (X: middle, Y: 512 steps down from max) */
-	pr_debug("Moving to home position: X back by %d, Y back by 512\n", motor.x_max / 2);
-	motor_move_steps(-(motor.x_max / 2), -512);
+	/* Step 2: Set position based on home_position_center parameter */
+	if (home_position_center) {
+		/* Move to center position and set as home (0, 0) */
+		pr_debug("Moving to center position: X back by %d, Y back by 512\n", motor.x_max / 2);
+		motor_move_steps(-(motor.x_max / 2), -512);
 
-	/* Wait for motors to stop */
-	timeout = 600;
-	while (motor.running && timeout > 0) {
-		msleep(100);
-		timeout--;
+		/* Wait for motors to stop */
+		timeout = 600;
+		while (motor.running && timeout > 0) {
+			msleep(100);
+			timeout--;
+		}
+
+		if (timeout == 0) {
+			pr_err("Homing timeout - motors did not stop at center\n");
+			motor.running = false;
+			return -ETIMEDOUT;
+		}
+
+		/* Set center as home position (0, 0) */
+		motor.x_pos = 0;
+		motor.y_pos = 0;
+		pr_info("Motor homing completed - center position set to (0, 0)\n");
+	} else {
+		/* Set maximum limits as current position */
+		motor.x_pos = motor.x_max;
+		motor.y_pos = motor.y_max;
+		pr_info("Motor homing completed - at maximum position (%d, %d)\n",
+			motor.x_max, motor.y_max);
 	}
 
-	if (timeout == 0) {
-		pr_err("Homing timeout - motors did not stop at home\n");
-		motor.running = false;
-		return -ETIMEDOUT;
-	}
-
-	/* Set home position */
-	motor.x_pos = 0;
-	motor.y_pos = 0;
 	motor.homed = true;
-
-	pr_info("Motor homing sequence completed - position calibrated to (0, 0)\n");
 	return 0;
 }
 
