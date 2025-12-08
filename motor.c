@@ -89,6 +89,8 @@ static int x_channel = 1;
 static int y_channel = 0;
 static int max_speed = 430;
 static int home_position_center = 0;
+static int invert_x = 0;
+static int invert_y = 0;
 module_param(hmaxstep, int, 0644);
 MODULE_PARM_DESC(hmaxstep, "Maximum horizontal (X-axis) steps");
 module_param(vmaxstep, int, 0644);
@@ -101,6 +103,10 @@ module_param(max_speed, int, 0644);
 MODULE_PARM_DESC(max_speed, "Maximum motor speed (default 430)");
 module_param(home_position_center, int, 0644);
 MODULE_PARM_DESC(home_position_center, "Move to center position before setting home (1=yes, 0=no, default 0)");
+module_param(invert_x, int, 0644);
+MODULE_PARM_DESC(invert_x, "Invert X-axis direction (1=inverted, 0=normal, default 0)");
+module_param(invert_y, int, 0644);
+MODULE_PARM_DESC(invert_y, "Invert Y-axis direction (1=inverted, 0=normal, default 0)");
 
 /* Module globals */
 dev_t motor_dev_number;
@@ -320,12 +326,12 @@ static void motor_move_steps(int x_steps, int y_steps)
 		/* Determine direction and encode target */
 		if (x_steps > 0) {
 			/* Move left - direct encoding */
-			direction = TMI8152_DIR_LEFT;
-			encoded_value = target;
+			direction = invert_x ? TMI8152_DIR_RIGHT : TMI8152_DIR_LEFT;
+			encoded_value = invert_x ? (TMI8152_MAX_POS - target) : target;
 		} else {
 			/* Move right - complemented encoding */
-			direction = TMI8152_DIR_RIGHT;
-			encoded_value = TMI8152_MAX_POS - target;
+			direction = invert_x ? TMI8152_DIR_LEFT : TMI8152_DIR_RIGHT;
+			encoded_value = invert_x ? target : (TMI8152_MAX_POS - target);
 		}
 
 		target_low = encoded_value & 0xFF;
@@ -355,12 +361,12 @@ static void motor_move_steps(int x_steps, int y_steps)
 		/* Determine direction and encode target */
 		if (y_steps > 0) {
 			/* Move up - direct encoding */
-			direction = TMI8152_DIR_LEFT;
-			encoded_value = target;
+			direction = invert_y ? TMI8152_DIR_RIGHT : TMI8152_DIR_LEFT;
+			encoded_value = invert_y ? (TMI8152_MAX_POS - target) : target;
 		} else {
 			/* Move down - complemented encoding */
-			direction = TMI8152_DIR_RIGHT;
-			encoded_value = TMI8152_MAX_POS - target;
+			direction = invert_y ? TMI8152_DIR_LEFT : TMI8152_DIR_RIGHT;
+			encoded_value = invert_y ? target : (TMI8152_MAX_POS - target);
 		}
 
 		target_low = encoded_value & 0xFF;
