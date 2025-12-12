@@ -7,6 +7,7 @@
 #include <linux/uaccess.h>
 #include <linux/kthread.h>
 #include <linux/delay.h>
+#include <linux/jiffies.h>
 #include "tmi8152_spi_dev.h"
 #include "tmi8152_regs.h"
 #include "motor.h"
@@ -75,9 +76,14 @@ struct motor_state {
 	int y_pos;              /* Current Y position in steps */
 	int x_max;              /* Maximum X steps */
 	int y_max;              /* Maximum Y steps */
+	int x_center;           /* Logical center for X axis */
+	int y_center;           /* Logical center for Y axis */
 	int x_ch;               /* Hardware channel for X-axis */
 	int y_ch;               /* Hardware channel for Y-axis */
 	int speed;              /* Current speed setting */
+	int target_x;           /* Pending X target when move completes */
+	int target_y;           /* Pending Y target when move completes */
+	unsigned long move_deadline_jiffies; /* Runaway cutoff timestamp */
 	bool running;           /* Motor running flag */
 	bool homed;             /* Has homing been completed? */
 };
@@ -88,9 +94,12 @@ static int vmaxstep = 2730;
 static int x_channel = 1;
 static int y_channel = 0;
 static int max_speed = 430;
-static int home_position_center = 0;
+static int home_position_center = 1;
+static int center_x_override = -1;
+static int center_y_override = -1;
 static int invert_x = 0;
 static int invert_y = 0;
+static int move_timeout_ms = 15000;
 module_param(hmaxstep, int, 0644);
 MODULE_PARM_DESC(hmaxstep, "Maximum horizontal (X-axis) steps");
 module_param(vmaxstep, int, 0644);
@@ -102,11 +111,23 @@ MODULE_PARM_DESC(y_channel, "Hardware channel for Y-axis (0 or 1, default 0)");
 module_param(max_speed, int, 0644);
 MODULE_PARM_DESC(max_speed, "Maximum motor speed (default 430)");
 module_param(home_position_center, int, 0644);
-MODULE_PARM_DESC(home_position_center, "Move to center position before setting home (1=yes, 0=no, default 0)");
+MODULE_PARM_DESC(home_position_center, "Move to center position before setting home (1=yes, 0=no, default 1)");
+module_param(center_x_override, int, 0644);
+MODULE_PARM_DESC(center_x_override,
+		 "Override X-axis logical center in absolute steps (-1 uses half range)");
+module_param(center_y_override, int, 0644);
+MODULE_PARM_DESC(center_y_override,
+		 "Override Y-axis logical center in absolute steps (-1 uses half range)");
 module_param(invert_x, int, 0644);
 MODULE_PARM_DESC(invert_x, "Invert X-axis direction (1=inverted, 0=normal, default 0)");
 module_param(invert_y, int, 0644);
 MODULE_PARM_DESC(invert_y, "Invert Y-axis direction (1=inverted, 0=normal, default 0)");
+module_param(move_timeout_ms, int, 0644);
+MODULE_PARM_DESC(move_timeout_ms,
+	       "Maximum milliseconds a move may run before the driver forces a stop (0 disables)");
+
+#define HOMING_POLL_INTERVAL_MS 100
+#define HOMING_PHASE_TIMEOUT_MS 60000
 
 /* Module globals */
 dev_t motor_dev_number;
@@ -119,6 +140,11 @@ static struct motor_state motor;
 static void motor_read_position(int *x_pos, int *y_pos);
 static void motor_move_steps(int x_steps, int y_steps);
 static void motor_stop(void);
+static int wait_for_motor_idle(const char *phase, int timeout_ms);
+static int homing_phase(int x_steps, int y_steps, const char *phase);
+static void motor_refresh_center_targets(void);
+static int motor_ops_goback(void);
+static int motor_ops_reset(struct motor_reset_data *reset_data);
 
 /**
  * Motor monitor thread - polls position every 100ms while motor is running
@@ -133,6 +159,15 @@ static int motor_monitor_fn(void *data)
 
 	while (!kthread_should_stop()) {
 		if (motor.running) {
+			if (move_timeout_ms > 0 && motor.move_deadline_jiffies &&
+			    time_after(jiffies, motor.move_deadline_jiffies)) {
+				pr_err("Motor move exceeded %d ms, forcing stop\n",
+					move_timeout_ms);
+				motor_stop();
+				motor.move_deadline_jiffies = 0;
+				motor.homed = false;
+				continue;
+			}
 			motor_read_position(&x_pos, &y_pos);
 
 			/* Check if position has stopped changing */
@@ -140,11 +175,12 @@ static int motor_monitor_fn(void *data)
 				stable_count++;
 				/* Consider motor stopped after 2 consecutive stable readings (200ms) */
 				if (stable_count >= 2) {
-					/* Update position based on actual chip movement */
-					if (motor.homed) {
-						motor.x_pos += x_pos;
-						motor.y_pos += y_pos;
-					}
+					/* Commit pending targets when hardware reports idle */
+					motor.x_pos = motor.target_x;
+					motor.y_pos = motor.target_y;
+					motor.target_x = motor.x_pos;
+					motor.target_y = motor.y_pos;
+					motor.move_deadline_jiffies = 0;
 					pr_info("Motor stopped: x=%d, y=%d\n",
 						motor.x_pos, motor.y_pos);
 					motor.running = false;
@@ -172,58 +208,68 @@ static int motor_monitor_fn(void *data)
  */
 static int motor_homing(void)
 {
-	int timeout;
+	int half_x = motor.x_max > 0 ? motor.x_max / 2 : 0;
+	int half_y = motor.y_max > 0 ? motor.y_max / 2 : 0;
+	int center_x_target;
+	int center_y_target;
+	int ret;
 
-	pr_info("Starting motor homing sequence\n");
-
-	/* Step 1: Move both motors to maximum position to hit physical limits */
-	pr_debug("Moving to maximum limits: x=%d, y=%d\n", motor.x_max, motor.y_max);
-	motor_move_steps(motor.x_max, motor.y_max);
-
-	/* Wait for motors to stop (max 60 seconds timeout) */
-	timeout = 600; /* 60 seconds / 100ms = 600 iterations */
-	while (motor.running && timeout > 0) {
-		msleep(100);
-		timeout--;
+	if (motor.x_max <= 0 && motor.y_max <= 0) {
+		pr_err("Homing aborted - max step configuration missing\n");
+		return -EINVAL;
 	}
 
-	if (timeout == 0) {
-		pr_err("Homing timeout - motors did not stop at maximum\n");
-		motor.running = false;
-		return -ETIMEDOUT;
-	}
+	motor_refresh_center_targets();
+	center_x_target = motor.x_center;
+	center_y_target = motor.y_center;
 
-	pr_debug("Reached maximum limits\n");
+	pr_info("Starting enhanced homing sweep\n");
 
-	/* Step 2: Set position based on home_position_center parameter */
-	if (home_position_center) {
-		/* Move to center position and set as home (0, 0) */
-		pr_debug("Moving to center position: X back by %d, Y back by 512\n", motor.x_max / 2);
-		motor_move_steps(-(motor.x_max / 2), -512);
+	ret = homing_phase(-half_x, -half_y, "preload sweep");
+	if (ret)
+		return ret;
 
-		/* Wait for motors to stop */
-		timeout = 600;
-		while (motor.running && timeout > 0) {
-			msleep(100);
-			timeout--;
-		}
+	ret = homing_phase(motor.x_max, motor.y_max, "limit sweep");
+	if (ret)
+		return ret;
 
-		if (timeout == 0) {
-			pr_err("Homing timeout - motors did not stop at center\n");
-			motor.running = false;
-			return -ETIMEDOUT;
-		}
-
-		/* Set center as home position (0, 0) */
+	/* Driver now knows we're sitting at the far limits */
+	if (motor.x_max > 0)
+		motor.x_pos = motor.x_max;
+	else
 		motor.x_pos = 0;
+	if (motor.y_max > 0)
+		motor.y_pos = motor.y_max;
+	else
 		motor.y_pos = 0;
-		pr_info("Motor homing completed - center position set to (0, 0)\n");
+	motor.target_x = motor.x_pos;
+	motor.target_y = motor.y_pos;
+
+	if (home_position_center) {
+		int delta_x = 0;
+		int delta_y = 0;
+
+		if (motor.x_max > 0)
+			delta_x = center_x_target - motor.x_pos;
+		if (motor.y_max > 0)
+			delta_y = center_y_target - motor.y_pos;
+
+		ret = homing_phase(delta_x, delta_y, "center return");
+		if (ret)
+			return ret;
+		motor.x_pos = center_x_target;
+		motor.y_pos = center_y_target;
+		motor.target_x = motor.x_pos;
+		motor.target_y = motor.y_pos;
+		pr_info("Enhanced homing complete - logical center (%d, %d)\n",
+			motor.x_pos, motor.y_pos);
 	} else {
-		/* Set maximum limits as current position */
 		motor.x_pos = motor.x_max;
 		motor.y_pos = motor.y_max;
-		pr_info("Motor homing completed - at maximum position (%d, %d)\n",
-			motor.x_max, motor.y_max);
+		motor.target_x = motor.x_pos;
+		motor.target_y = motor.y_pos;
+		pr_info("Enhanced homing complete - origin left at (%d, %d)\n",
+			motor.x_pos, motor.y_pos);
 	}
 
 	motor.homed = true;
@@ -304,8 +350,36 @@ static void motor_move_steps(int x_steps, int y_steps)
 	unsigned int encoded_value;
 	u8 target_low, target_high;
 	u8 direction;
+ 	bool movement = false;
+	long pending;
 
 	pr_debug("motor_move_steps: x=%d, y=%d, speed=0x%02x\n", x_steps, y_steps, motor.speed);
+
+	if (x_steps == 0 && y_steps == 0)
+		return;
+
+	/* Predict final logical coordinates so status matches daemon expectations */
+	motor.target_x = motor.x_pos;
+	motor.target_y = motor.y_pos;
+	if (x_steps != 0) {
+		pending = (long)motor.x_pos + x_steps;
+		if (motor.x_max > 0)
+			motor.target_x = clamp_t(int, pending, 0, motor.x_max);
+		else
+			motor.target_x = pending;
+		movement = true;
+	}
+	if (y_steps != 0) {
+		pending = (long)motor.y_pos + y_steps;
+		if (motor.y_max > 0)
+			motor.target_y = clamp_t(int, pending, 0, motor.y_max);
+		else
+			motor.target_y = pending;
+		movement = true;
+	}
+
+	if (!movement)
+		return;
 
 	/* Clear both axis phase registers to 0 so inactive axis reads 0 */
 	mutex_lock(&tmi8152_spi_lock);
@@ -317,6 +391,11 @@ static void motor_move_steps(int x_steps, int y_steps)
 
 	/* Set motor running flag to start monitoring */
 	motor.running = true;
+	if (move_timeout_ms > 0)
+		motor.move_deadline_jiffies = jiffies +
+			msecs_to_jiffies(move_timeout_ms);
+	else
+		motor.move_deadline_jiffies = 0;
 
 	/* Handle X-axis movement */
 	if (x_steps != 0) {
@@ -391,6 +470,111 @@ static void motor_move_steps(int x_steps, int y_steps)
 	pr_debug("Motor movement sequence completed\n");
 }
 
+static int wait_for_motor_idle(const char *phase, int timeout_ms)
+{
+	int loops;
+
+	if (timeout_ms <= 0)
+		timeout_ms = HOMING_PHASE_TIMEOUT_MS;
+
+	loops = DIV_ROUND_UP(timeout_ms, HOMING_POLL_INTERVAL_MS);
+	while (motor.running && loops-- > 0)
+		msleep(HOMING_POLL_INTERVAL_MS);
+
+	if (motor.running) {
+		pr_err("Homing timeout while %s\n", phase);
+		motor.running = false;
+		return -ETIMEDOUT;
+	}
+
+	pr_debug("Homing %s completed\n", phase);
+	return 0;
+}
+
+static int homing_phase(int x_steps, int y_steps, const char *phase)
+{
+	if (x_steps == 0 && y_steps == 0)
+		return 0;
+
+	pr_debug("Homing phase %s: x=%d, y=%d\n", phase, x_steps, y_steps);
+	motor_move_steps(x_steps, y_steps);
+	return wait_for_motor_idle(phase, HOMING_PHASE_TIMEOUT_MS);
+}
+
+static void motor_refresh_center_targets(void)
+{
+	if (motor.x_max > 0) {
+		if (center_x_override >= 0)
+			motor.x_center = clamp_t(int, center_x_override, 0, motor.x_max);
+		else
+			motor.x_center = motor.x_max / 2;
+	} else {
+		motor.x_center = 0;
+	}
+
+	if (motor.y_max > 0) {
+		if (center_y_override >= 0)
+			motor.y_center = clamp_t(int, center_y_override, 0, motor.y_max);
+		else
+			motor.y_center = motor.y_max / 2;
+	} else {
+		motor.y_center = 0;
+	}
+}
+
+static int motor_ops_goback(void)
+{
+	int delta_x;
+	int delta_y;
+
+	if (!motor.homed) {
+		pr_warn("MOTOR_GOBACK requested before homing complete\n");
+		return -EINVAL;
+	}
+
+	delta_x = motor.x_center - motor.x_pos;
+	delta_y = motor.y_center - motor.y_pos;
+
+	if (delta_x == 0 && delta_y == 0) {
+		pr_debug("Already at logical center, no goback needed\n");
+		return 0;
+	}
+
+	pr_debug("Returning to logical center: dx=%d, dy=%d\n", delta_x, delta_y);
+	motor_move_steps(delta_x, delta_y);
+	return 0;
+}
+
+static int motor_ops_reset(struct motor_reset_data *reset_data)
+{
+	int ret;
+
+	if (reset_data && reset_data->x_max_steps && reset_data->y_max_steps) {
+		motor.x_max = reset_data->x_max_steps;
+		motor.y_max = reset_data->y_max_steps;
+		motor_refresh_center_targets();
+		motor.x_pos = clamp_t(int, (int)reset_data->x_cur_step, 0, motor.x_max);
+		motor.y_pos = clamp_t(int, (int)reset_data->y_cur_step, 0, motor.y_max);
+		motor.target_x = motor.x_pos;
+		motor.target_y = motor.y_pos;
+		motor.homed = true;
+		return 0;
+	}
+
+	ret = motor_homing();
+	if (ret)
+		return ret;
+
+	if (reset_data) {
+		reset_data->x_max_steps = motor.x_max;
+		reset_data->y_max_steps = motor.y_max;
+		reset_data->x_cur_step = motor.x_pos;
+		reset_data->y_cur_step = motor.y_pos;
+	}
+
+	return 0;
+}
+
 /**
  * Binary search to find speed table index for given speed value
  */
@@ -439,13 +623,26 @@ static void motor_stop(void)
 	motor_read_position(&x_pos, &y_pos);
 
 	/* Update position based on actual chip movement */
-	if (motor.homed) {
-		motor.x_pos += x_pos;
-		motor.y_pos += y_pos;
+	motor.x_pos += x_pos;
+	motor.y_pos += y_pos;
+	if (motor.x_max > 0) {
+		if (motor.x_pos < 0)
+			motor.x_pos = 0;
+		else if (motor.x_pos > motor.x_max)
+			motor.x_pos = motor.x_max;
+	}
+	if (motor.y_max > 0) {
+		if (motor.y_pos < 0)
+			motor.y_pos = 0;
+		else if (motor.y_pos > motor.y_max)
+			motor.y_pos = motor.y_max;
 	}
 
 	/* Clear running flag */
 	motor.running = false;
+	motor.move_deadline_jiffies = 0;
+	motor.target_x = motor.x_pos;
+	motor.target_y = motor.y_pos;
 
 	pr_debug("Motors stopped at position: x=%d, y=%d\n",
 		motor.x_pos, motor.y_pos);
@@ -514,17 +711,9 @@ static long motor_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		break;
 
 	case MOTOR_GOBACK:
-		pr_info("MOTOR_GOBACK: returning to home (0, 0) from (%d, %d)\n",
-			motor.x_pos, motor.y_pos);
-
-		if (!motor.homed) {
-			pr_warn("Motor not homed - cannot go back to unknown home position\n");
-			return -EINVAL;
-		}
-
-		/* Calculate delta to home position (0, 0) */
-		motor_move_steps(-motor.x_pos, -motor.y_pos);
-
+		ret = motor_ops_goback();
+		if (ret)
+			return ret;
 		break;
 
 	case MOTOR_SPEED:
@@ -575,25 +764,18 @@ static long motor_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 			pr_debug("MOTOR_RESET ioctl received\n");
 
-			/* Copy reset data from userspace */
 			if (copy_from_user(&reset_data, (void __user *)arg, sizeof(reset_data))) {
 				pr_err("Failed to copy reset data from userspace\n");
 				return -EFAULT;
 			}
 
-			/* If max_steps provided, update them (optional) */
-			if (reset_data.x_max_steps != 0)
-				motor.x_max = reset_data.x_max_steps;
-			if (reset_data.y_max_steps != 0)
-				motor.y_max = reset_data.y_max_steps;
-
-			pr_debug("Reset with max steps: x=%d, y=%d\n", motor.x_max, motor.y_max);
-
-			/* Perform homing sequence */
-			ret = motor_homing();
-			if (ret < 0) {
-				pr_err("Homing sequence failed: %d\n", ret);
+			ret = motor_ops_reset(&reset_data);
+			if (ret)
 				return ret;
+
+			if (copy_to_user((void __user *)arg, &reset_data, sizeof(reset_data))) {
+				pr_err("Failed to copy reset data back to userspace\n");
+				return -EFAULT;
 			}
 		}
 		break;
@@ -643,6 +825,12 @@ static int __init motor_init(void)
 	motor.y_ch = y_channel;
 	motor.x_max = hmaxstep;
 	motor.y_max = vmaxstep;
+	motor_refresh_center_targets();
+	motor.x_pos = motor.x_center;
+	motor.y_pos = motor.y_center;
+	motor.target_x = motor.x_pos;
+	motor.target_y = motor.y_pos;
+	motor.move_deadline_jiffies = 0;
 
 	/* Default to 95% of max_speed using speed profile table */
 	{
@@ -660,7 +848,7 @@ static int __init motor_init(void)
 	}
 
 	motor.running = false;
-	motor.homed = false;
+	motor.homed = true;
 
 	pr_debug("Channel mapping: X-axis -> Channel %d, Y-axis -> Channel %d\n", motor.x_ch, motor.y_ch);
 
