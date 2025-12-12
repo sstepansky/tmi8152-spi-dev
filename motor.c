@@ -81,6 +81,8 @@ struct motor_state {
 	int x_ch;               /* Hardware channel for X-axis */
 	int y_ch;               /* Hardware channel for Y-axis */
 	int speed;              /* Current speed setting */
+	u8 speed_reg_x;         /* Register value for X axis speed */
+	u8 speed_reg_y;         /* Register value for Y axis speed */
 	int target_x;           /* Pending X target when move completes */
 	int target_y;           /* Pending Y target when move completes */
 	unsigned long move_deadline_jiffies; /* Runaway cutoff timestamp */
@@ -93,7 +95,7 @@ static int hmaxstep = 7850;
 static int vmaxstep = 2730;
 static int x_channel = 1;
 static int y_channel = 0;
-static int max_speed = 430;
+static int max_speed = 1000;
 static int home_position_center = 1;
 static int center_x_override = -1;
 static int center_y_override = -1;
@@ -350,10 +352,11 @@ static void motor_move_steps(int x_steps, int y_steps)
 	unsigned int encoded_value;
 	u8 target_low, target_high;
 	u8 direction;
- 	bool movement = false;
+	bool movement = false;
 	long pending;
 
-	pr_debug("motor_move_steps: x=%d, y=%d, speed=0x%02x\n", x_steps, y_steps, motor.speed);
+	pr_debug("motor_move_steps: x=%d, y=%d, speed_x=0x%02x, speed_y=0x%02x\n",
+		x_steps, y_steps, motor.speed_reg_x, motor.speed_reg_y);
 
 	if (x_steps == 0 && y_steps == 0)
 		return;
@@ -423,7 +426,7 @@ static void motor_move_steps(int x_steps, int y_steps)
 		mutex_lock(&tmi8152_spi_lock);
 		tmi8152_spi_write(ch_ctrl[motor.x_ch] | 0x80, TMI8152_MODE_POS);
 		tmi8152_spi_write(ch_dir[motor.x_ch] | 0x80, direction);
-		tmi8152_spi_write(ch_speed[motor.x_ch] | 0x80, motor.speed);
+		tmi8152_spi_write(ch_speed[motor.x_ch] | 0x80, motor.speed_reg_x);
 		tmi8152_spi_write(ch_ctrl[motor.x_ch] | 0x80, TMI8152_MODE_POS);
 		tmi8152_spi_write(ch_tgt_l[motor.x_ch] | 0x80, target_low);
 		tmi8152_spi_write(ch_tgt_h[motor.x_ch] | 0x80, target_high);
@@ -458,7 +461,7 @@ static void motor_move_steps(int x_steps, int y_steps)
 		mutex_lock(&tmi8152_spi_lock);
 		tmi8152_spi_write(ch_ctrl[motor.y_ch] | 0x80, TMI8152_MODE_POS);
 		tmi8152_spi_write(ch_dir[motor.y_ch] | 0x80, direction);
-		tmi8152_spi_write(ch_speed[motor.y_ch] | 0x80, motor.speed);
+		tmi8152_spi_write(ch_speed[motor.y_ch] | 0x80, motor.speed_reg_y);
 		tmi8152_spi_write(ch_ctrl[motor.y_ch] | 0x80, TMI8152_MODE_POS);
 		tmi8152_spi_write(ch_tgt_l[motor.y_ch] | 0x80, target_low);
 		tmi8152_spi_write(ch_tgt_h[motor.y_ch] | 0x80, target_high);
@@ -602,6 +605,33 @@ static int binary_search_speed_table(u32 target_value)
 	return high;
 }
 
+static int clamp_speed_value(int speed_value)
+{
+	if (speed_value > max_speed) {
+		pr_debug("Speed %d exceeds max_speed %d, clamping\n",
+			speed_value, max_speed);
+		speed_value = max_speed;
+	}
+	if (speed_value < 0) {
+		pr_warn("Negative speed %d, clamping to 0\n", speed_value);
+		speed_value = 0;
+	}
+
+	return speed_value;
+}
+
+static u8 speed_value_to_reg(int speed_value)
+{
+	int index;
+	u8 multiplier, base;
+
+	index = binary_search_speed_table(speed_value);
+	multiplier = speed_profile_table[index].multiplier;
+	base = speed_profile_table[index].base;
+
+	return base + (multiplier * 32);
+}
+
 /**
  * Stop motor movement
  */
@@ -719,42 +749,49 @@ static long motor_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	case MOTOR_SPEED:
 		{
 			int speed_value;
+			u8 reg;
 
-			/* Copy speed value from userspace */
 			if (copy_from_user(&speed_value, (void __user *)arg, sizeof(int))) {
 				pr_err("Failed to copy speed from userspace\n");
 				return -EFAULT;
 			}
 
-			/* Clamp to valid range [0, max_speed] */
-			if (speed_value > max_speed) {
-				pr_debug("Speed %d exceeds max_speed %d, clamping\n",
-					speed_value, max_speed);
-				speed_value = max_speed;
+			speed_value = clamp_speed_value(speed_value);
+			reg = speed_value_to_reg(speed_value);
+			motor.speed_reg_x = reg;
+			motor.speed_reg_y = reg;
+			motor.speed = reg;
+
+			pr_debug("MOTOR_SPEED: input=%d, register=0x%02x\n",
+				speed_value, reg);
+		}
+		break;
+
+	case MOTOR_SPEED_AXIS:
+		{
+			struct motor_axis_speed axis_speed;
+			u8 reg_x;
+			u8 reg_y;
+			int clamped_x;
+			int clamped_y;
+
+			if (copy_from_user(&axis_speed, (void __user *)arg,
+					sizeof(axis_speed))) {
+				pr_err("Failed to copy axis speeds from userspace\n");
+				return -EFAULT;
 			}
-			if (speed_value < 0) {
-				pr_warn("Negative speed %d, clamping to 0\n", speed_value);
-				speed_value = 0;
-			}
 
-			/* Use speed profile table for accurate speed-to-register mapping */
-			{
-				int index;
-				u8 multiplier, base;
+			clamped_x = clamp_speed_value(axis_speed.x_speed);
+			clamped_y = clamp_speed_value(axis_speed.y_speed);
+			reg_x = speed_value_to_reg(clamped_x);
+			reg_y = speed_value_to_reg(clamped_y);
 
-				/* Binary search for appropriate table index */
-				index = binary_search_speed_table(speed_value);
+			motor.speed_reg_x = reg_x;
+			motor.speed_reg_y = reg_y;
+			motor.speed = max_t(int, reg_x, reg_y);
 
-				/* Extract values from table */
-				multiplier = speed_profile_table[index].multiplier;
-				base = speed_profile_table[index].base;
-
-				/* Calculate register value: base + (multiplier × 32) */
-				motor.speed = base + (multiplier * 32);
-
-				pr_debug("MOTOR_SPEED: input=%d, index=%d, mult=%d, base=%d, register=0x%02x\n",
-					speed_value, index, multiplier, base, motor.speed);
-			}
+			pr_debug("MOTOR_SPEED_AXIS: input_x=%d (reg=0x%02x), input_y=%d (reg=0x%02x)\n",
+				clamped_x, reg_x, clamped_y, reg_y);
 		}
 		break;
 
@@ -842,6 +879,8 @@ static int __init motor_init(void)
 		multiplier = speed_profile_table[index].multiplier;
 		base = speed_profile_table[index].base;
 		motor.speed = base + (multiplier * 32);
+		motor.speed_reg_x = motor.speed;
+		motor.speed_reg_y = motor.speed;
 
 		pr_debug("Default speed: 95%% (%d/%d) -> index=%d, register=0x%02x\n",
 			speed_95pct, max_speed, index, motor.speed);
