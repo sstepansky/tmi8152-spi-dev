@@ -9,6 +9,7 @@
 #define MOTOR_SPEED                 0x5
 #define MOTOR_GOBACK                0x6
 #define MOTOR_CRUISE                0x7
+#define MOTOR_SPEED_AXIS            0x8
 
 /* Motor Status */
 enum motor_status {
@@ -50,6 +51,15 @@ struct motor_message {
 	unsigned int x_max_steps;
 	unsigned int y_max_steps;
 	unsigned int inversion_state;
+};
+
+/**
+ * struct motor_axis_speed - Independent axis speed request
+ * Used with MOTOR_SPEED_AXIS ioctl
+ */
+struct motor_axis_speed {
+	int x_speed;
+	int y_speed;
 };
 
 #endif /* _MOTOR_H_ */
